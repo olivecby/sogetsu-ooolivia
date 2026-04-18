@@ -1,10 +1,10 @@
 // src/components/BookingPage.js
 import React, { useState, useEffect, useRef } from 'react';
-import { supabase } from '../utils/supabase';
 import AdminControls from './AdminControls';
 import StudentControls from './StudentControls';
 
-// 获取西雅图日期字符串 YYYY-MM-DD
+const API_BASE = 'http://localhost:5001';
+
 const toSeattleDateString = (date) => {
   return date.toLocaleDateString('en-CA', {
     timeZone: 'America/Los_Angeles',
@@ -18,11 +18,10 @@ const BookingPage = ({ user, onLogout }) => {
   const [pmChecked, setPMChecked] = useState(false);
   const [disabledMessage, setDisabledMessage] = useState('');
   const [isMobile, setIsMobile] = useState(false);
-  const [disabledDates, setDisabledDates] = useState([]); // 这里现在存储对象数组 [{date, am, pm}]
+  const [disabledDates, setDisabledDates] = useState([]);
   const [isAdminMode, setIsAdminMode] = useState(false);
   const adminDirtyRef = useRef(false);
 
-  // 管理员设置不可用状态的临时状态
   const [adminAmUnavailable, setAdminAmUnavailable] = useState(false);
   const [adminPmUnavailable, setAdminPmUnavailable] = useState(false);
 
@@ -56,7 +55,6 @@ const BookingPage = ({ user, onLogout }) => {
     }
   }, [user]);
 
-  // 获取未来的周三和周六
   const getFutureDates = () => {
     const dates = [];
     const today = new Date();
@@ -75,51 +73,44 @@ const BookingPage = ({ user, onLogout }) => {
   };
 
   const fetchDisabledDates = async () => {
-    const { data, error } = await supabase.from('dates').select('date, am, pm');
-    if (!error) {
+    try {
+      const res = await fetch(`${API_BASE}/api/dates`);
+      const data = await res.json();
       setDisabledDates(data);
+    } catch (err) {
+      console.error('Failed to fetch disabled dates', err);
     }
   };
 
   const fetchBookings = async () => {
-    const { data, error } = await supabase
-      .from('courses')
-      .select(`id, date, materials, am, users!inner (name, email)`)
-      .order('date', { ascending: true })
-      .order('am', { ascending: false })
-      .order('id', { ascending: true });
-
-    if (!error) {
-      const transformedData = data.map((course) => ({
-        ...course,
-        name: course.users.name,
-        email: course.users.email,
-      }));
-      setBookedDates(transformedData);
+    try {
+      const res = await fetch(`${API_BASE}/api/bookings`);
+      const data = await res.json();
+      setBookedDates(data);
+    } catch (err) {
+      console.error('Failed to fetch bookings', err);
     }
   };
 
-  // 管理员保存不可用设置
   const handleAdminUpdateStatus = async () => {
     if (!selectedDate) return;
     const dateStr = toSeattleDateString(selectedDate);
 
-    // 如果am和pm都没勾选为不可用，则从表中删除该日期记录（表示完全Available）
-    if (!adminAmUnavailable && !adminPmUnavailable) {
-      await supabase.from('dates').delete().eq('date', dateStr);
-    } else {
-      const { error } = await supabase.from('dates').upsert(
-        {
+    try {
+      await fetch(`${API_BASE}/api/dates`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           date: dateStr,
           am: adminAmUnavailable,
           pm: adminPmUnavailable,
-        },
-        { onConflict: 'date' },
-      );
-      console.log('upsert error', error);
+        }),
+      });
+      adminDirtyRef.current = false;
+      await fetchDisabledDates();
+    } catch (err) {
+      console.error('Failed to update availability', err);
     }
-    adminDirtyRef.current = false;
-    await fetchDisabledDates();
   };
 
   const renderActionButton = (currentDisabledStatus) => {
@@ -180,7 +171,6 @@ const BookingPage = ({ user, onLogout }) => {
     }
 
     const dateStr = toSeattleDateString(selectedDate);
-    // 检查管理员是否设置了该时段不可用
     const dateStatus = disabledDates.find((d) => d.date === dateStr);
     if ((!pmChecked && dateStatus?.am) || (pmChecked && dateStatus?.pm)) {
       alert('This period is set to unavailable by teacher');
@@ -196,17 +186,22 @@ const BookingPage = ({ user, onLogout }) => {
       return;
     }
 
-    const { error } = await supabase.from('courses').insert([
-      {
-        date: dateStr,
-        email: user.email,
-        materials: materialsChecked,
-        am: !pmChecked,
-      },
-    ]);
-
-    if (!error) {
-      await fetchBookings();
+    try {
+      const res = await fetch(`${API_BASE}/api/bookings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          date: dateStr,
+          email: user.email,
+          materials: materialsChecked,
+          am: !pmChecked,
+        }),
+      });
+      if (res.ok) {
+        await fetchBookings();
+      }
+    } catch (err) {
+      console.error('Failed to book', err);
     }
   };
 
@@ -217,10 +212,18 @@ const BookingPage = ({ user, onLogout }) => {
       return;
     }
     const dateStr = toSeattleDateString(selectedDate);
-    const { error } = await supabase.from('courses').delete().eq('date', dateStr).eq('email', user.email);
-    if (!error) {
-      await fetchBookings();
-    } else {
+    try {
+      const res = await fetch(`${API_BASE}/api/bookings`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: dateStr, email: user.email }),
+      });
+      if (res.ok) {
+        await fetchBookings();
+      } else {
+        alert('Failed to cancel booking');
+      }
+    } catch (err) {
       alert('Failed to cancel booking');
     }
   };
@@ -282,9 +285,6 @@ const BookingPage = ({ user, onLogout }) => {
     const dateStr = toSeattleDateString(selectedDate);
     const existingStatus = disabledDates.find((d) => d.date === dateStr);
 
-    console.log('adminDirtyRef', adminDirtyRef.current);
-    console.log('nowtest', existingStatus);
-
     adminDirtyRef.current = false;
 
     setAdminAmUnavailable(!!existingStatus?.am);
@@ -325,7 +325,6 @@ const BookingPage = ({ user, onLogout }) => {
           const isSelected = selectedDate?.toDateString() === date.toDateString();
           const seattleDateStr = toSeattleDateString(date);
 
-          // 获取当前日期的不可用状态
           const status = disabledDates.find((d) => d.date === seattleDateStr);
           const isAmUnavailable = status?.am;
           const isPmUnavailable = status?.pm;
@@ -354,7 +353,6 @@ const BookingPage = ({ user, onLogout }) => {
               <div style={{ fontWeight: 'bold', marginBottom: '10px', color: isPast ? '#9e9e9e' : '#333' }}>{getDayOfWeek(date)}</div>
               <div style={{ marginBottom: '10px', color: '#555' }}>{date.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' })}</div>
 
-              {/* 展示时段不可用状态 */}
               <div style={{ fontSize: '12px', marginBottom: '5px' }}>
                 {isAmUnavailable && <span style={{ color: '#d32f2f', marginRight: '5px' }}>AM Unavailable</span>}
                 {isPmUnavailable && <span style={{ color: '#d32f2f' }}>PM Unavailable</span>}

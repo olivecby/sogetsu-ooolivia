@@ -1,85 +1,121 @@
-// api/server.js
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const { createClient } = require('@supabase/supabase-js');
+const sqlite3 = require('sqlite3').verbose();
+const path = require('path');
 
-// 初始化 Supabase 客户端
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const db = new sqlite3.Database(path.join(__dirname, '..', 'sogetsu-registration.db'));
+db.run('PRAGMA foreign_keys = ON');
 
 const app = express();
 const PORT = 5001;
 
-// 中间件
 app.use(cors());
 app.use(bodyParser.json());
 
-// 用户登录
+const dbAll = (sql, params = []) =>
+  new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)));
+  });
+
+const dbGet = (sql, params = []) =>
+  new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
+  });
+
+const dbRun = (sql, params = []) =>
+  new Promise((resolve, reject) => {
+    db.run(sql, params, function (err) {
+      err ? reject(err) : resolve({ lastID: this.lastID, changes: this.changes });
+    });
+  });
+
 app.post('/api/login', async (req, res) => {
   const { email, pin } = req.body;
+  const normalizedEmail = (email || '').trim().toLowerCase();
 
-  if (pin === '1234') {
-    const { data: users, error } = await supabase.from('users').select('*').eq('email', email).single();
+  if (pin !== 'megumi') {
+    return res.status(401).json({ success: false, message: 'Invalid email or PIN' });
+  }
 
-    if (error) {
-      console.error('Database error:', error);
-      return res.status(500).json({ success: false, message: 'Database error' });
-    }
-
-    if (users) {
-      res.json({ success: true, user: users });
+  try {
+    const user = await dbGet('SELECT * FROM users WHERE email = ?', [normalizedEmail]);
+    if (user) {
+      res.json({ success: true, user });
     } else {
       res.status(401).json({ success: false, message: 'Invalid email or PIN' });
     }
-  } else {
-    res.status(401).json({ success: false, message: 'Invalid PIN' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Database error' });
   }
 });
 
-// 获取所有预约
 app.get('/api/bookings', async (req, res) => {
-  const { data: bookings, error } = await supabase.from('courses').select('date, users(name, email), materials').eq('users.email', 'courses.email');
-
-  if (error) {
-    return res.status(500).json({ success: false, message: 'Database error' });
+  try {
+    const bookings = await dbAll(
+      `SELECT course.id, course.date, course.materials, course.am, users.name, users.email
+       FROM course
+       JOIN users ON course.email = users.email
+       ORDER BY course.date ASC, course.am DESC, course.id ASC`
+    );
+    res.json(bookings);
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Database error' });
   }
-
-  res.json(bookings);
 });
 
-// 创建预约
 app.post('/api/bookings', async (req, res) => {
-  const { date, email, materials } = req.body;
-  const { data, error } = await supabase.from('courses').insert([{ date, email, materials }]);
-
-  if (error) {
-    return res.status(500).json({ success: false, message: 'Database error' });
+  const { date, email, materials, am } = req.body;
+  try {
+    await dbRun(
+      'INSERT INTO course (date, email, materials, am) VALUES (?, ?, ?, ?)',
+      [date, email, materials ? 1 : 0, am ? 1 : 0]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Database error' });
   }
-
-  res.json({ success: true, data });
 });
 
-// 取消预约
-app.delete('/api/bookings/:date', async (req, res) => {
-  const { date } = req.params;
-  const { email } = req.body;
-
-  if (!email) {
-    return res.status(400).json({ success: false, message: 'Email is required' });
+app.delete('/api/bookings', async (req, res) => {
+  const { date, email } = req.body;
+  if (!email || !date) {
+    return res.status(400).json({ success: false, message: 'Email and date are required' });
   }
-
-  const { error } = await supabase.from('courses').delete().eq('date', date).eq('email', email);
-
-  if (error) {
-    return res.status(500).json({ success: false, message: 'Database error' });
+  try {
+    await dbRun('DELETE FROM course WHERE date = ? AND email = ?', [date, email]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Database error' });
   }
-
-  res.json({ success: true });
 });
 
-// 启动服务器
+app.get('/api/dates', async (req, res) => {
+  try {
+    const dates = await dbAll('SELECT date, am, pm FROM dates');
+    res.json(dates);
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Database error' });
+  }
+});
+
+app.post('/api/dates', async (req, res) => {
+  const { date, am, pm } = req.body;
+  try {
+    if (!am && !pm) {
+      await dbRun('DELETE FROM dates WHERE date = ?', [date]);
+    } else {
+      await dbRun(
+        'INSERT INTO dates (date, am, pm) VALUES (?, ?, ?) ON CONFLICT(date) DO UPDATE SET am = ?, pm = ?',
+        [date, am ? 1 : 0, pm ? 1 : 0, am ? 1 : 0, pm ? 1 : 0]
+      );
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Database error' });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 });

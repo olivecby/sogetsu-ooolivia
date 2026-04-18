@@ -1,5 +1,4 @@
 import React, { useState } from 'react';
-import { supabase } from '../utils/supabase';
 import { AiOutlineEye, AiOutlineEyeInvisible } from 'react-icons/ai';
 
 const Login = ({ onLogin }) => {
@@ -14,21 +13,17 @@ const Login = ({ onLogin }) => {
       setError('Please enter both email and PIN');
       return;
     }
-    const normalizedEmail = email.trim().toLowerCase();
     try {
-      // 查询 Supabase users 表，检查 email 是否存在
-      const { data, error } = await supabase.from('users').select('*').eq('email', normalizedEmail).single();
-
-      if (error || !data) {
-        setError('Invalid email or PIN');
-        return;
-      }
-
-      // 简单验证 PIN 是否为 "megumi"
-      if (pin === 'megumi') {
-        onLogin(data);
+      const res = await fetch('http://localhost:5001/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, pin }),
+      });
+      const result = await res.json();
+      if (res.ok && result.success) {
+        onLogin(result.user);
       } else {
-        setError('Invalid email or PIN');
+        setError(result.message || 'Invalid email or PIN');
       }
     } catch (err) {
       setError('Login failed. Please try again.');
